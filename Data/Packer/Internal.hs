@@ -49,7 +49,7 @@ import Control.Exception (Exception, throwIO, try, SomeException)
 import Control.Monad.Trans
 import Control.Applicative (Alternative(..), Applicative(..), (<$>), (<*>))
 import Control.Concurrent.MVar
-import Control.Monad (when)
+import Control.Monad (when, liftM2)
 
 -- | Represent a memory block with a ptr as beginning
 data Memory = Memory {-# UNPACK #-} !(Ptr Word8)
@@ -92,11 +92,12 @@ bindPacking m1 m2 = PackingDone $ \cst st -> do
             holeVar <- newMVar 0
             withForeignPtr fPtr $ \ptr -> do
                 (r2, mem) <- case c of
-                    PackHole sz fh       -> do liftM2 (,) (m2 $ fh ptr) (return $ Memory (ptr `plusPtr` sz) (1024 - sz))
+                    PackHole sz fh       -> liftM2 (,) (return $ m2 $ fh ptr) (return $ Memory (ptr `plusPtr` sz) (1024 - sz))
                     PackByteString bs    -> do
                         B.memcpy ptr bs (B.length bs) -- TODO: check B.length bs <= 1024
+                        liftM2 (,) (m2 (ptr `plusPtr` (B.length bs))) (return $ Memory (ptr `plusPtr` (B.length bs) (1024 - (B.length bs))))
                 case r2 of
-                    PackingDone d'     -> d' (ptr, holeVar) (Memory ptr 1024)
+                    PackingDone d'     -> d' (ptr, holeVar) (mem)
                     PackingContinue c' -> undefined -- ERROR ?????????????
 {-# INLINE bindPacking #-}
 
