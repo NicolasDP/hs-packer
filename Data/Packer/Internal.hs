@@ -12,6 +12,8 @@
 --
 module Data.Packer.Internal
     ( Packing(..)
+    , PackingValue(..)
+    , PackAction(..)
     , Hole
     , Unpacking(..)
     , Memory(..)
@@ -41,6 +43,8 @@ import Foreign.Ptr
 import Foreign.ForeignPtr
 import Data.Data
 import Data.Word
+import qualified Data.ByteString as B
+import qualified Data.ByteString.Internal as B
 import Control.Exception (Exception, throwIO, try, SomeException)
 import Control.Monad.Trans
 import Control.Applicative (Alternative(..), Applicative(..), (<$>), (<*>))
@@ -51,15 +55,22 @@ import Control.Monad (when)
 data Memory = Memory {-# UNPACK #-} !(Ptr Word8)
                      {-# UNPACK #-} !Int
 
--- | Packing monad
-newtype Packing a = Packing { runPacking_ :: (Ptr Word8, MVar Int) -> Memory -> IO (a, Memory) }
+
+data PackAction a = PackNow (Ptr Word8 -> IO ())
+                  | PackFuture (Ptr Word8 -> Hole a)
+
+data PackContinue a = PackHole Int (Ptr Word8 -> Hole a)
+                    | PackByteString B.ByteString
+
+data Packing a = PackingDone ((Ptr Word8, MVar Int) -> Memory -> IO (a, Memory))
+               | PackingContinue (PackContinue a)
 
 instance Monad Packing where
     return = returnPacking
     (>>=)  = bindPacking
 
-instance MonadIO Packing where
-    liftIO f = Packing $ \_ st -> f >>= \a -> return (a,st)
+-- instance MonadIO Packing where
+--     liftIO f = Packing $ \_ st -> f >>= \a -> return (a, st)
 
 instance Functor Packing where
     fmap = fmapPacking
@@ -69,17 +80,35 @@ instance Applicative Packing where
     (<*>) = apPacking
 
 bindPacking :: Packing a -> (a -> Packing b) -> Packing b
-bindPacking m1 m2 = Packing $ \cst st -> do
-    (a, st2) <- runPacking_ m1 cst st
-    runPacking_ (m2 a) cst st2
+bindPacking m1 m2 = PackingDone $ \cst st -> do
+    case m1 of
+        PackingDone     d -> do
+            (a, st2) <- d cst st
+            case m2 a of
+                PackingDone d'     -> d' cst st2
+                PackingContinue c' -> undefined
+        PackingContinue c -> do
+            fPtr <- B.mallocByteString 1024 -- TODO !!!!!!!!!!!!!!!!!
+            holeVar <- newMVar 0
+            withForeignPtr fPtr $ \ptr -> do
+                (r2, mem) <- case c of
+                    PackHole sz fh       -> do liftM2 (,) (m2 $ fh ptr) (return $ Memory (ptr `plusPtr` sz) (1024 - sz))
+                    PackByteString bs    -> do
+                        B.memcpy ptr bs (B.length bs) -- TODO: check B.length bs <= 1024
+                case r2 of
+                    PackingDone d'     -> d' (ptr, holeVar) (Memory ptr 1024)
+                    PackingContinue c' -> undefined -- ERROR ?????????????
 {-# INLINE bindPacking #-}
 
 fmapPacking :: (a -> b) -> Packing a -> Packing b
-fmapPacking f m = Packing $ \cst st -> runPacking_ m cst st >>= \(a, st2) -> return (f a, st2)
+fmapPacking f m = PackingDone $ \cst st -> do
+     case m of
+         PackingDone d -> d cst st >>= \(a, st2) -> return (f a, st2)
+         PackingContinue c -> undefined -- ERROR ?????????
 {-# INLINE fmapPacking #-}
 
 returnPacking :: a -> Packing a
-returnPacking a = Packing $ \_ st -> return (a,st)
+returnPacking a = PackingDone $ \_ st -> return (a, st)
 {-# INLINE [0] returnPacking #-}
 
 apPacking :: Packing (a -> b) -> Packing a -> Packing b
@@ -217,20 +246,37 @@ unpackLookahead f = Unpacking $
     \_ st@(Memory ptr sz) -> f ptr sz >>= \a -> return (a, st)
 
 -- | run a pack action on the internal packed buffer.
-packCheckAct :: Int -> (Ptr Word8 -> IO a) -> Packing a
-packCheckAct n act = Packing $ \_ (Memory ptr sz) -> do
-    when (sz < n) (throwIO $ OutOfBoundPacking sz n)
-    r <- act ptr
-    return (r, Memory (ptr `plusPtr` n) (sz - n))
+packCheckAct :: Int -> PackAction a -> Packing a
+packCheckAct n act = PackingDone checkAction
+  where
+ --   checkAction :: (Ptr Word8, MVar Int) -> Memory -> IO (a, Memory)
+    checkAction _ (Memory ptr sz)
+      | sz < n = do
+         r <- case act of
+             PackNow nAct -> do
+                 fPtr <- B.mallocByteString n
+                 withForeignPtr fPtr $ \tPtr -> do
+                     nAct tPtr
+                     B.memcpy ptr tPtr sz
+                     return $ PackingContinue $ B.PS fPtr sz (sz - n)
+             PackFuture fAct -> return $ PackingContinue $ PackHole fAct
+         return (r, Memory (ptr `plusPtr` n) 0)
+      | otherwise = do
+          r <- case act of
+              PackNow nAct -> do
+                  nAct ptr
+                  return $ PackingDone Nothing
+              PackFuture fAct -> return $ PackingDone $ Just (fAct ptr)
+          return (r, Memory (ptr `plusPtr` n) (sz - n))
 {-# INLINE [0] packCheckAct #-}
 
 -- | modify holes
 modifyHoles :: (Int -> Int) -> Packing ()
-modifyHoles f = Packing $ \(_, holesMVar) mem -> modifyMVar_ holesMVar (\v -> return $! f v) >> return ((), mem)
+modifyHoles f = PackingDone $ \(_, holesMVar) mem -> modifyMVar_ holesMVar (\v -> return $! f v) >> return ((), mem)
 
 -- | Get the position in the memory block.
 packGetPosition :: Packing Int
-packGetPosition = Packing $ \(iniPtr, _) mem@(Memory ptr _) -> return (ptr `minusPtr` iniPtr, mem)
+packGetPosition = PackingDone $ \(iniPtr, _) mem@(Memory ptr _) -> return (ptr `minusPtr` iniPtr, mem)
 
 -- | A Hole represent something that need to be filled
 -- later, for example a CRC, a prefixed size, etc.
@@ -240,9 +286,9 @@ packGetPosition = Packing $ \(iniPtr, _) mem@(Memory ptr _) -> return (ptr `minu
 newtype Hole a = Hole (a -> IO ())
 
 -- | Put a Hole of a specific size for filling later.
-packHole :: Int -> (Ptr Word8 -> a -> IO ()) -> Packing (Hole a)
+packHole :: Int -> (Ptr Word8 -> a -> IO ()) -> Packing a
 packHole n f = do
-    r <- packCheckAct n (\ptr -> return $ Hole (\w -> f ptr w))
+    r <- packCheckAct n $ PackFuture (\ptr -> Hole (\w -> f ptr w))
     modifyHoles (1 +)
     return r
 

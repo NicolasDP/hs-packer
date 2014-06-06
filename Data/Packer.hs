@@ -29,51 +29,67 @@ module Data.Packer
     , unpackSkip
     , unpackSetPosition
     , unpackGetPosition
+    -- ** 8bits getters
     , getWord8
+    -- ** 16bits getters
     , getWord16
     , getWord16LE
     , getWord16BE
+    -- ** 32bits getters
     , getWord32
     , getWord32LE
     , getWord32BE
+    -- ** 64bits getters
     , getWord64
     , getWord64LE
     , getWord64BE
+    -- ** Bytes getters
     , getBytes
     , getBytesCopy
     , getBytesWhile
     , getRemaining
     , getRemainingCopy
     , getStorable
+    -- ** Fload getters
     , getFloat32LE
     , getFloat32BE
     , getFloat64LE
     , getFloat64BE
+    -- ** isolator
     , isolate
     -- * Packing functions
     , packGetPosition
+    -- ** 8bits
     , putWord8
+    -- ** 16bits
     , putWord16
     , putWord16LE
     , putWord16BE
+    -- ** 32bits
     , putWord32
     , putWord32LE
     , putWord32BE
-    , putHoleWord32
-    , putHoleWord32LE
-    , putHoleWord32BE
+    -- ** 64bits
     , putWord64
     , putWord64LE
     , putWord64BE
-    , putHoleWord64
-    , putHoleWord64LE
-    , putHoleWord64BE
+    -- bytes
     , putBytes
+    -- storable
     , putStorable
+    -- floats
     , putFloat32LE
     , putFloat32BE
     , putFloat64LE
     , putFloat64BE
+    -- ** put holes
+    , putHoleWord32
+    , putHoleWord32LE
+    , putHoleWord32BE
+    , putHoleWord64
+    , putHoleWord64LE
+    , putHoleWord64BE
+    -- ** file holes
     , fillHole
     ) where
 
